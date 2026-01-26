@@ -1,6 +1,7 @@
+import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -25,10 +26,20 @@ def extract_phone_number_id(payload: Dict[str, Any]) -> str:
     )
 
 
-async def forward_payload(url: str, payload: Dict[str, Any]) -> None:
+async def forward_payload(
+    url: str,
+    body_bytes: bytes,
+    signature: Optional[str],
+    content_type: Optional[str],
+) -> None:
     try:
+        headers = {}
+        if signature:
+            headers["X-Hub-Signature-256"] = signature
+        if content_type:
+            headers["Content-Type"] = content_type
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, content=body_bytes, headers=headers)
             logger.info("Forwarded payload to %s status=%s", url, response.status_code)
     except Exception as exc:
         logger.exception("Failed to forward payload to %s: %s", url, exc)
@@ -50,8 +61,9 @@ async def verify_webhook(request: Request) -> PlainTextResponse:
 
 @app.post("/webhook")
 async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -> Dict[str, str]:
+    body_bytes = await request.body()
     try:
-        payload: Dict[str, Any] = await request.json()
+        payload: Dict[str, Any] = json.loads(body_bytes.decode("utf-8"))
     except Exception as exc:
         logger.exception("Invalid JSON payload: %s", exc)
         return {"status": "ok"}
@@ -67,5 +79,13 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks) -
         logger.error("No route configured for phone_number_id=%s", phone_number_id)
         return {"status": "ok"}
 
-    background_tasks.add_task(forward_payload, target_url, payload)
+    signature = request.headers.get("X-Hub-Signature-256")
+    content_type = request.headers.get("Content-Type")
+    background_tasks.add_task(
+        forward_payload,
+        target_url,
+        body_bytes,
+        signature,
+        content_type,
+    )
     return {"status": "ok"}
